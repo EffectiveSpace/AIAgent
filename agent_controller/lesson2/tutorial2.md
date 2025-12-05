@@ -476,113 +476,127 @@ bool check_crc(uint8_t data[], int len, uint8_t received_crc) {
 }
 ```
 
-## 6. Интеграция протокола в архитектуру ИИ-агента
+## 6. Интеграция протокола в архитектуру Ollama ИИ-агента
 
-Теперь мы интегрируем протокольный инструмент в архитектуру ИИ-агента:
+Теперь мы интегрируем протокольный инструмент в архитектуру Ollama ИИ-агента:
 
 ```python
-# agent_with_protocol.py
+# ollama_agent_with_protocol.py
+import ollama
 import json
 from arduino_protocol import create_protocol_arduino_tool
 
-class ProtocolAgent:
+class OllamaProtocolAgent:
     def __init__(self, arduino_port: str = 'COM3'):
         self.arduino_tool = create_protocol_arduino_tool(arduino_port)
-        self.tools = {
-            'send_command_to_arduino': self.arduino_tool,
-            'general_response': self._general_response
-        }
-    
-    def _general_response(self, query: str) -> str:
-        """Общий ответ на запросы, не требующие специальных инструментов"""
-        return f"Я понимаю ваш запрос: '{query}', но не могу выполнить его без специальных инструментов."
-    
-    def choose_tool(self, user_query: str) -> dict:
-        """
-        Определяет, какой инструмент использовать для выполнения запроса
-        """
-        # Проверяем, связан ли запрос с Arduino
-        arduino_keywords = ["ардуино", "светодиод", "led", "устройство", "физическое", "управл", "включ", "выключ"]
-        
-        if any(keyword in user_query.lower() for keyword in arduino_keywords):
-            # Определяем тип команды
-            if "вкл" in user_query.lower() or "включ" in user_query.lower() or "зажги" in user_query.lower():
-                command = "LED_ON"
-                params = {}
-            elif "выкл" in user_query.lower() or "откл" in user_query.lower() or "потуши" in user_query.lower():
-                command = "LED_OFF"
-                params = {}
-            elif "угол" in user_query.lower() or "серво" in user_query.lower():
-                # Извлекаем угол из запроса (упрощенная логика)
-                import re
-                angle_match = re.search(r'(\d+)', user_query)
-                angle = int(angle_match.group(1)) if angle_match else 90
-                command = "SET_SERVO_ANGLE"
-                params = {"angle": angle}
-            elif "сенсор" in user_query.lower() or "датчик" in user_query.lower() or "температура" in user_query.lower():
-                command = "READ_SENSOR"
-                params = {}
-            elif "статус" in user_query.lower() or "состояние" in user_query.lower():
-                command = "GET_STATUS"
-                params = {}
-            else:
-                command = "GET_STATUS"  # команда по умолчанию
-                params = {}
-            
-            return {
-                "tool_name": "send_command_to_arduino",
-                "arguments": {
-                    "command": command,
-                    "params": params
+
+        # Определяем инструменты для Ollama
+        self.tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "send_command_to_arduino",
+                    "description": "Отправка команды на Arduino устройство через протокол",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {
+                                "type": "string",
+                                "enum": ["LED_ON", "LED_OFF", "SET_SERVO_ANGLE", "READ_SENSOR", "GET_STATUS"],
+                                "description": "Команда для Arduino"
+                            },
+                            "params": {
+                                "type": "object",
+                                "description": "Параметры команды, например угол для сервопривода"
+                            }
+                        },
+                        "required": ["command"]
+                    }
                 }
             }
-        else:
-            # Для других запросов используем общий инструмент
-            return {
-                "tool_name": "general_response",
-                "arguments": {"query": user_query}
-            }
-    
-    def run(self, user_request: str) -> str:
-        """
-        Выполняет запрос пользователя
-        """
-        tool_choice = self.choose_tool(user_request)
-        tool_name = tool_choice["tool_name"]
-        arguments = tool_choice["arguments"]
-        
-        if tool_name in self.tools:
-            result = self.tools[tool_name](**arguments)
-            return result
-        else:
-            return f"Неизвестный инструмент: {tool_name}"
+        ]
 
-# Функция запуска агента (для использования с LLM)
-def run_protocol_agent(user_request: str, arduino_port: str = 'COM3') -> str:
-    """
-    Функция для интеграции с агентом на основе LLM
-    """
-    agent = ProtocolAgent(arduino_port)
-    return agent.run(user_request)
+    def run_with_ollama(self, user_request: str) -> str:
+        """
+        Выполняет запрос пользователя через Ollama с использованием инструментов
+        """
+        system_prompt = """
+        Ты — ИИ-агент, способный управлять Arduino устройствами через протокол.
+        Используй инструмент send_command_to_arduino для взаимодействия с Arduino.
+        Команды могут быть: LED_ON, LED_OFF, SET_SERVO_ANGLE, READ_SENSOR, GET_STATUS.
+        Для SET_SERVO_ANGLE используй параметр angle.
+        Отвечай на русском языке.
+        """
 
-# Тестирование
+        try:
+            # Вызываем Ollama с инструментами
+            response = ollama.chat(
+                model='llama3',
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_request}
+                ],
+                tools=self.tools,
+                options={"temperature": 0.3}
+            )
+
+            message = response['message']
+
+            # Проверяем, вызваны ли инструменты
+            if 'tool_calls' in message and message['tool_calls']:
+                results = []
+                for tool_call in message['tool_calls']:
+                    function_name = tool_call['function']['name']
+                    arguments = json.loads(tool_call['function']['arguments'])
+
+                    if function_name == "send_command_to_arduino":
+                        # Выполняем команду Arduino через протокол
+                        result = self.arduino_tool(
+                            command=arguments.get('command'),
+                            params=arguments.get('params', {})
+                        )
+                        results.append(result)
+
+                # Если были вызовы инструментов, получаем финальный ответ
+                if results:
+                    tool_results_content = "Результаты выполнения команд: " + "; ".join(results)
+
+                    final_response = ollama.chat(
+                        model='llama3',
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_request},
+                            {"role": "tool", "content": tool_results_content}
+                        ]
+                    )
+
+                    return final_response['message']['content']
+
+            # Если инструменты не вызваны, возвращаем обычный ответ
+            return message['content']
+
+        except Exception as e:
+            return f"Ошибка при работе с Ollama: {e}"
+
+# Тестирование Ollama протокольного агента
 if __name__ == "__main__":
-    # Тестируем агента с разными запросами
-    agent = ProtocolAgent()
-    
+    print("=== Тестирование Ollama протокольного агента ===")
+
+    agent = OllamaProtocolAgent()  # Можно указать конкретный порт
+
     test_queries = [
         "Включи светодиод на Arduino",
-        "Выключи светодиод на Arduino", 
+        "Выключи светодиод на Arduino",
         "Покажи статус устройства",
         "Установи угол сервопривода на 45 градусов",
-        "Прочитай значение с датчика",
-        "Расскажи о погоде"
+        "Прочитай значение с датчика"
     ]
-    
+
     for query in test_queries:
-        print(f"\nЗапрос: {query}")
-        result = agent.run(query)
+        print(f"\n--- Запрос: {query} ---")
+        result = agent.run_with_ollama(query)
         print(f"Результат: {result}")
+        print("-" * 50)
 ```
 
 ## 7. Проверка надежности протокола
@@ -669,15 +683,16 @@ if __name__ == "__main__":
     test_protocol_crc()
 ```
 
-## 8. Заключение: Мощь структурированного взаимодействия
+## 8. Заключение: Мощь структурированного взаимодействия с Ollama
 
 В этом уроке мы:
 - Создали полноценную реализацию протокола для надежной связи Python ↔ Arduino
 - Обеспечили проверку целостности данных с помощью CRC
 - Реализовали систему синхронизации для надежного определения начала и конца пакетов
-- Интегрировали протокол в архитектуру ИИ-агента как надежный инструмент
+- Интегрировали протокол в архитектуру Ollama ИИ-агента как надежный инструмент
 - Протестировали устойчивость протокола к ошибкам передачи
+- Научились использовать Ollama для понимания естественного языка и вызова протокольных инструментов
 
-Теперь наш ИИ-агент может надежно взаимодействовать с физическими устройствами, зная, что команды будут доставлены корректно и ответы не будут искажены. Это фундамент для создания надежных систем автоматизации, робототехники и IoT-устройств на базе ИИ-агентов.
+Теперь наш Ollama ИИ-агент может надежно взаимодействовать с физическими устройствами, понимая команды на естественном языке и зная, что команды будут доставлены корректно и ответы не будут искажены. Это фундамент для создания надежных систем автоматизации, робототехники и IoT-устройств на базе локальных LLM.
 
-В следующем уроке мы рассмотрим, как ИИ-агент может не только отправлять команды в Arduino, но и корректно обрабатывать ответы от него, создавая полноценный двунаправленный канал коммуникации.
+В следующем уроке мы рассмотрим, как Ollama ИИ-агент может не только отправлять команды в Arduino, но и корректно обрабатывать ответы от него, создавая полноценный двунаправленный канал коммуникации с использованием Ollama.

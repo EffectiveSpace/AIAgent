@@ -54,7 +54,7 @@
 | Python ↔ API устройства | Простая интеграция с готовыми системами | Зависимость от производителя, ограниченная гибкость |
 | **Python ↔ протокол ↔ микроконтроллер** | **Полный контроль, низкая цена, гибкость** | **Требуется знание электроники и протоколов** |
 
-## 3. Архитектура ИИ-агента для физического взаимодействия
+## 3. Архитектура ИИ-агента для физического взаимодействия с использованием Ollama
 
 В главах 1-4 мы изучили архитектуру ИИ-агента:
 - **Мозг (LLM)**: Принимает решения
@@ -62,17 +62,29 @@
 - **Память**: Сохраняет контекст
 - **Планировщик и цикл ReAct**: Управляет процессом
 
-Теперь мы **расширим инструменты**, добавив туда **функции для общения с микроконтроллерами**:
+Теперь мы **расширим инструменты**, добавив туда **функции для общения с микроконтроллерами**, и интегрируем **локальную LLM (Ollama)**:
 
 ```
 Новая архитектура:
-[LLM] → [Инструменты: web_search, calculator, file_reader, ... , send_command_to_arduino] → [Физическое выполнение]
+[Ollama LLM] → [Инструменты: web_search, calculator, file_reader, ... , send_command_to_arduino] → [Физическое выполнение]
 ```
 
-### Пример расширенного системного промпта:
+### Подготовка Ollama для работы с Arduino
+
+Прежде чем интегрировать LLM, убедитесь, что Ollama установлена и запущена:
+
+```bash
+# Проверьте, что Ollama запущена в фоне
+ollama serve
+
+# Скачайте модель
+ollama pull llama3
+```
+
+### Пример расширенного системного промпта для Ollama:
 
 ```
-Ты — ИИ-агент "PhysicalAgent-GPT", способный управлять физическими устройствами.
+Ты — ИИ-агент "PhysicalAgent-Ollama", способный управлять физическими устройствами через Arduino.
 
 Ты имеешь доступ к следующим инструментам:
 - `search_web(query: str)`: Поиск в интернете
@@ -81,6 +93,115 @@
 - `finish_task(final_answer: str)`: Финальный ответ
 
 Ты работаешь в цикле "Мысль → Действие → Наблюдение" и можешь управлять физическими устройствами.
+```
+
+### Интеграция Ollama с Arduino инструментами
+
+Теперь мы можем использовать Ollama для понимания команд пользователя и выбора подходящих инструментов:
+
+```python
+# ollama_arduino_integration.py
+import ollama
+import json
+from arduino_tool import create_arduino_tool
+
+# Создаем инструмент для Arduino
+arduino_tool = create_arduino_tool()
+
+# Определяем инструменты для Ollama
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "send_command_to_arduino",
+            "description": "Отправка команды на Arduino устройство",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "Команда для Arduino (led_on, led_off, read_sensor, set_servo_angle)"
+                    },
+                    "params": {
+                        "type": "object",
+                        "description": "Параметры команды"
+                    }
+                },
+                "required": ["command"]
+            }
+        }
+    }
+]
+
+def run_ollama_agent_with_arduino(user_request: str) -> str:
+    """
+    Запускает Ollama агент, который может управлять Arduino
+    """
+    system_prompt = """
+    Ты — ИИ-агент, способный управлять физическими устройствами через Arduino.
+    Используй инструмент send_command_to_arduino для взаимодействия с Arduino.
+    command может быть: "led_on", "led_off", "read_sensor", "set_servo_angle".
+    params может содержать дополнительные параметры, если они требуются.
+    Отвечай на русском языке.
+    """
+
+    try:
+        # Вызываем Ollama с инструментами
+        response = ollama.chat(
+            model='llama3',
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_request}
+            ],
+            tools=tools,
+            options={"temperature": 0.3}  # Меньше творчества, больше точности
+        )
+
+        message = response['message']
+
+        # Проверяем, вызваны ли инструменты
+        if 'tool_calls' in message and message['tool_calls']:
+            # Обрабатываем вызовы инструментов
+            for tool_call in message['tool_calls']:
+                function_name = tool_call['function']['name']
+                arguments = json.loads(tool_call['function']['arguments'])
+
+                if function_name == "send_command_to_arduino":
+                    # Выполняем команду Arduino
+                    result = arduino_tool(arguments.get('command'), arguments.get('params'))
+
+                    # Получаем финальный ответ от Ollama с учетом результата инструмента
+                    final_response = ollama.chat(
+                        model='llama3',
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_request},
+                            {"role": "tool", "content": result}
+                        ]
+                    )
+
+                    return final_response['message']['content']
+
+        # Если инструменты не вызваны, возвращаем обычный ответ
+        return message['content']
+
+    except Exception as e:
+        return f"Ошибка при работе с Ollama: {e}"
+
+# Тестирование интеграции Ollama + Arduino
+if __name__ == "__main__":
+    print("=== Тестирование Ollama агента с Arduino ===")
+
+    test_queries = [
+        "Включи светодиод на Arduino",
+        "Прочитай значение с датчика",
+        "Найди информацию о датчиках температуры"  # Эта команда не будет использовать Arduino
+    ]
+
+    for query in test_queries:
+        print(f"\nЗапрос: {query}")
+        result = run_ollama_agent_with_arduino(query)
+        print(f"Результат: {result}")
 ```
 
 ## 4. Введение в протоколы: Структура пакета для Arduino
@@ -163,9 +284,9 @@ void loop() {
 }
 ```
 
-## 6. Создание первого инструмента для ИИ-агента
+## 6. Создание первого инструмента для ИИ-агента с поддержкой Ollama
 
-Теперь мы создадим **инструмент**, который наш ИИ-агент сможет использовать для общения с Arduino.
+Теперь мы создадим **инструмент**, который наш ИИ-агент на базе Ollama сможет использовать для общения с Arduino.
 
 ```python
 # arduino_tool.py
@@ -179,7 +300,7 @@ class ArduinoProtocol:
         self.baudrate = baudrate
         self.ser = None
         self.connect()
-    
+
     def connect(self):
         try:
             self.ser = serial.Serial(self.port, self.baudrate, timeout=1)
@@ -187,19 +308,19 @@ class ArduinoProtocol:
             print(f"Подключено к Arduino на порту {self.port}")
         except Exception as e:
             print(f"Ошибка подключения к Arduino: {e}")
-    
+
     def send_command_to_arduino(self, command: str, params: Dict[str, Any] = None) -> str:
         """
         Отправляет команду на Arduino через протокол
         """
         # В реальности здесь будет отправка байтового пакета по протоколу
         # Для простоты сейчас отправляем текстовую команду
-        
+
         if params:
             message = f"{command}:{params}\n"
         else:
             message = f"{command}\n"
-        
+
         try:
             self.ser.write(message.encode())
             # Ждем ответ
@@ -207,130 +328,188 @@ class ArduinoProtocol:
             return f"Команда '{command}' выполнена. Ответ: {response}"
         except Exception as e:
             return f"Ошибка выполнения команды '{command}': {e}"
-    
+
     def close(self):
         if self.ser and self.ser.is_open:
             self.ser.close()
 
-# Пример использования как инструмента для ИИ-агента
+# Пример использования как инструмента для Ollama ИИ-агента
 def create_arduino_tool():
     arduino = ArduinoProtocol()
-    
+
     def send_command_to_arduino(command: str, params: Dict[str, Any] = None) -> str:
         result = arduino.send_command_to_arduino(command, params)
         return result
-    
+
     # Закрываем соединение при завершении
     import atexit
     atexit.register(arduino.close)
-    
+
     return send_command_to_arduino
 
 # Тестирование
 if __name__ == "__main__":
     # Создаем инструмент
     arduino_tool = create_arduino_tool()
-    
+
     # Тестируем
     result = arduino_tool("test", {})
     print(result)
 ```
 
-## 7. Интеграция инструмента в ИИ-агента
+## 7. Интеграция инструмента в Ollama ИИ-агента
 
-Теперь наш ИИ-агент сможет использовать физическое устройство как один из своих инструментов:
+Теперь наш Ollama ИИ-агент сможет использовать физическое устройство как один из своих инструментов. В предыдущем примере мы уже видели базовую интеграцию, теперь рассмотрим более продвинутую реализацию:
 
 ```python
-# agent_with_arduino.py
+# ollama_agent_with_arduino.py
+import ollama
 import json
 from arduino_tool import create_arduino_tool
 
 # Создаем инструмент для Arduino
 arduino_tool = create_arduino_tool()
 
-def choose_tool(user_query: str) -> str:
+# Определяем инструменты для Ollama
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "send_command_to_arduino",
+            "description": "Отправка команды на Arduino устройство",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "enum": ["led_on", "led_off", "read_sensor", "set_servo_angle", "get_status"],
+                        "description": "Команда для Arduino"
+                    },
+                    "params": {
+                        "type": "object",
+                        "description": "Дополнительные параметры команды"
+                    }
+                },
+                "required": ["command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_web",
+            "description": "Поиск информации в интернете",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Поисковый запрос"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    }
+]
+
+def run_advanced_ollama_agent_with_arduino(user_request: str):
     """
-    Расширенная версия диспетчера инструментов с поддержкой Arduino
+    Запускает продвинутый Ollama агент с Arduino интеграцией
     """
     system_prompt = """
-    Ты — ИИ-диспетчер. Твоя задача — проанализировать запрос пользователя и выбрать один из следующих инструментов:
-    - 'search_engine': для поиска информации в интернете
-    - 'calculator': для математических вычислений
-    - 'send_command_to_arduino': для управления физическими устройствами (Arduino)
-      Параметры: {"command": "название_команды", "params": {...}}
-    - 'general_conversation': для общих ответов
-
-    Ответь в формате JSON: {"tool_name": "...", "arguments": {...}}
+    Ты — ИИ-агент, способный управлять физическими устройствами через Arduino и искать информацию в интернете.
+    Используй доступные инструменты в зависимости от запроса пользователя.
+    Для управления Arduino используй инструмент send_command_to_arduino.
+    Для поиска информации используй инструмент search_web.
+    Отвечай на русском языке и будь максимально полезным.
     """
 
-    # В реальности здесь будет вызов LLM
-    # Пока что симулируем логику
-    if "светодиод" in user_query.lower() or "ардуино" in user_query.lower():
-        # Определяем команду
-        if "вкл" in user_query.lower() or "включ" in user_query.lower():
-            command = "led_on"
-        elif "выкл" in user_query.lower() or "откл" in user_query.lower():
-            command = "led_off"
-        else:
-            command = "status"
-        
-        return json.dumps({
-            "tool_name": "send_command_to_arduino", 
-            "arguments": {"command": command, "params": {}}
-        })
-    else:
-        return json.dumps({
-            "tool_name": "search_engine", 
-            "arguments": {"query": user_query}
-        })
+    try:
+        # Вызываем Ollama с инструментами
+        response = ollama.chat(
+            model='llama3',
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_request}
+            ],
+            tools=tools,
+            options={"temperature": 0.3}
+        )
 
-# Пример интеграции
-def run_agent_with_arduino(user_request: str):
-    print(f"Запрос пользователя: {user_request}")
-    
-    # Выбираем инструмент
-    tool_choice = json.loads(choose_tool(user_request))
-    tool_name = tool_choice["tool_name"]
-    arguments = tool_choice["arguments"]
-    
-    print(f"Выбранный инструмент: {tool_name}")
-    print(f"Аргументы: {arguments}")
-    
-    # Выполняем команду
-    if tool_name == "send_command_to_arduino":
-        result = arduino_tool(**arguments)
-        print(f"Результат от Arduino: {result}")
-        return result
-    elif tool_name == "search_engine":
-        return f"Выполнение поиска для запроса: {arguments.get('query', '')} (симуляция)"
-    else:
-        return "Команда выполнена"
+        message = response['message']
 
-# Тестирование
+        print(f"Ollama ответ: {message}")
+
+        # Проверяем, вызваны ли инструменты
+        if 'tool_calls' in message and message['tool_calls']:
+            results = []
+            for tool_call in message['tool_calls']:
+                function_name = tool_call['function']['name']
+                arguments = json.loads(tool_call['function']['arguments'])
+
+                print(f"Вызов инструмента: {function_name} с аргументами: {arguments}")
+
+                if function_name == "send_command_to_arduino":
+                    result = arduino_tool(arguments.get('command'), arguments.get('params', {}))
+                    results.append(result)
+                    print(f"Результат от Arduino: {result}")
+
+                elif function_name == "search_web":
+                    # В реальном приложении тут будет реальный веб-поиск
+                    result = f"Результат поиска для запроса '{arguments.get('query')}': [симуляция поиска]"
+                    results.append(result)
+                    print(f"Результат поиска: {result}")
+
+            # Если были вызовы инструментов, получаем финальный ответ
+            if results:
+                # Формируем сообщение с результатами инструментов
+                tool_results_content = "Результаты инструментов: " + "; ".join(results)
+
+                final_response = ollama.chat(
+                    model='llama3',
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_request},
+                        {"role": "tool", "content": tool_results_content}
+                    ]
+                )
+
+                return final_response['message']['content']
+
+        # Если инструменты не вызваны, возвращаем обычный ответ
+        return message['content']
+
+    except Exception as e:
+        return f"Ошибка при работе с Ollama: {e}"
+
+# Тестирование продвинутой интеграции Ollama + Arduino
 if __name__ == "__main__":
-    print("=== Тестирование ИИ-агента с Arduino ===")
-    
-    # Примеры запросов
-    queries = [
+    print("=== Тестирование продвинутого Ollama агента с Arduino ===")
+
+    test_queries = [
         "Включи светодиод на Arduino",
-        "Найди мне информацию о датчиках температуры"
+        "Прочитай значение с датчика на Arduino",
+        "Найди мне информацию о датчиках температуры для Arduino"
     ]
-    
-    for query in queries:
-        print(f"\n--- Новый запрос ---")
-        result = run_agent_with_arduino(query)
-        print(f"Итоговый результат: {result}")
+
+    for query in test_queries:
+        print(f"\n--- Запрос: {query} ---")
+        result = run_advanced_ollama_agent_with_arduino(query)
+        print(f"Финальный результат: {result}")
+        print("-" * 50)
 ```
 
-## 8. Заключение: Новый уровень ИИ-агентов
+## 8. Заключение: Новый уровень ИИ-агентов с Ollama
 
 В этой главе мы:
 - Поняли концепцию интеграции ИИ-агентов с физическими устройствами
 - Узнали, почему микроконтроллеры и протоколы являются идеальной платформой для этого
-- Настроили среду для разработки
+- Настроили среду для разработки, включая локальную LLM Ollama
 - Создали первый инструмент для взаимодействия с Arduino
-- Интегрировали этот инструмент в архитектуру ИИ-агента
+- Интегрировали этот инструмент в архитектуру Ollama ИИ-агента
+- Научились использовать Ollama для понимания естественного языка и управления физическими устройствами
 
-Теперь ваш ИИ-агент может не только мыслить, но и **действовать в физическом мире**. Это открывает безграничные возможности: от умного дома до робототехники, от автоматизации процессов до интерактивных инсталляций.
+Теперь ваш Ollama ИИ-агент может не только мыслить, но и **действовать в физическом мире**, понимая команды на естественном языке. Это открывает безграничные возможности: от умного дома до робототехники, от автоматизации процессов до интерактивных инсталляций.
 
-Следующие уроки будут развивать эту идею, добавляя более сложные протоколы, обработку данных сенсоров, FSM для надежного взаимодействия и продвинутые сценарии использования ИИ-агентов с микроконтроллерами.
+Следующие уроки будут развивать эту идею, добавляя более сложные протоколы, обработку данных сенсоров, FSM для надежного взаимодействия и продвинутые сценарии использования Ollama ИИ-агентов с микроконтроллерами.

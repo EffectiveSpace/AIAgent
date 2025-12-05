@@ -328,213 +328,199 @@ if __name__ == "__main__":
     arduino.close()
 ```
 
-## 5. Интеграция ответов в архитектуру ИИ-агента
+## 5. Интеграция ответов в архитектуру Ollama ИИ-агента
 
-Теперь мы интегрируем обработку ответов в архитектуру ИИ-агента, чтобы он мог использовать полученную информацию для принятия решений:
+Теперь мы интегрируем обработку ответов в архитектуру Ollama ИИ-агента, чтобы он мог использовать полученную информацию для принятия решений:
 
 ```python
-# agent_with_responses.py
+# ollama_agent_with_responses.py
+import ollama
 import json
 import time
 from typing import Dict, Any
 from enhanced_arduino_interface import EnhancedArduinoInterface
 
-class AgentWithResponses:
+class OllamaAgentWithResponses:
     def __init__(self, arduino_port: str = 'COM3'):
         self.arduino = EnhancedArduinoInterface(arduino_port)
-        self.tools = {
-            'send_command_get_response': self._send_command_get_response,
-            'read_sensor': self._read_sensor,
-            'get_device_status': self._get_device_status,
-            'general_response': self._general_response
-        }
-        
-        # История наблюдений для памяти агента
-        self.observation_history = []
-    
-    def _send_command_get_response(self, command: str, params: Dict[str, Any] = None) -> str:
-        """Отправляет команду и возвращает структурированный ответ"""
-        command_map = {
-            'LED_ON': 0x01,
-            'LED_OFF': 0x02,
-            'SET_SERVO_ANGLE': 0x03,
-            'READ_SENSOR': 0x04,
-            'GET_STATUS': 0x05
-        }
-        
-        cmd_code = command_map.get(command)
-        if cmd_code is None:
-            return f"Неизвестная команда: {command}"
-        
-        # Подготовим параметры
-        param_list = None
-        if params:
-            param_list = []
-            for value in params.values():
-                if isinstance(value, list):
-                    param_list.extend([int(v) for v in value])
-                else:
-                    param_list.append(int(value))
-        
-        response = self.arduino.send_command_get_response(cmd_code, param_list)
-        
-        # Сохраняем наблюдение в истории
-        self.observation_history.append({
-            'command': command,
-            'response': response,
-            'timestamp': time.time()
-        })
-        
-        return self._format_response(response)
-    
-    def _read_sensor(self, sensor_type: str = 'temperature') -> str:
-        """Читает данные с сенсора"""
-        response = self.arduino.read_sensor(sensor_type)
-        
-        # Сохраняем наблюдение
-        self.observation_history.append({
-            'command': f'READ_{sensor_type.upper()}_SENSOR',
-            'response': response,
-            'timestamp': time.time()
-        })
-        
-        return self._format_response(response)
-    
-    def _get_device_status(self) -> str:
-        """Получает статус устройства"""
-        response = self.arduino.get_device_status()
-        
-        # Сохраняем наблюдение
-        self.observation_history.append({
-            'command': 'GET_DEVICE_STATUS',
-            'response': response,
-            'timestamp': time.time()
-        })
-        
-        return self._format_response(response)
-    
-    def _format_response(self, response: Dict[str, Any]) -> str:
-        """Форматирует ответ для пользователя"""
-        if response.get('type') == 'SENSOR_DATA':
-            return f"Данные сенсора: {response.get('value', 'неизвестно')}"
-        elif response.get('type') == 'DEVICE_STATUS':
-            led_status = response.get('led_status', False)
-            return f"Статус устройства: светодиод {'включен' if led_status else 'выключен'}"
-        elif response.get('type') == 'ACK':
-            return f"Команда выполнена успешно: {response.get('message', '')}"
-        elif response.get('type') == 'ERROR':
-            return f"Ошибка выполнения команды: {response.get('message', '')}"
-        elif response.get('type') == 'TIMEOUT':
-            return f"Таймаут: {response.get('message', '')}"
-        else:
-            return str(response)
-    
-    def _general_response(self, query: str) -> str:
-        return f"Я понимаю ваш запрос: '{query}', но не могу выполнить его без специальных инструментов."
-    
-    def choose_tool(self, user_query: str) -> dict:
-        """Определяет, какой инструмент использовать"""
-        # Анализируем запрос и выбираем подходящий инструмент
-        if "температура" in user_query.lower() or "сенсор" in user_query.lower():
-            return {
-                "tool_name": "read_sensor",
-                "arguments": {"sensor_type": "temperature"}
-            }
-        elif "статус" in user_query.lower() or "состояние" in user_query.lower():
-            return {
-                "tool_name": "get_device_status",
-                "arguments": {}
-            }
-        elif "вкл" in user_query.lower() or "включ" in user_query.lower():
-            return {
-                "tool_name": "send_command_get_response",
-                "arguments": {"command": "LED_ON", "params": {}}
-            }
-        elif "выкл" in user_query.lower() or "откл" in user_query.lower():
-            return {
-                "tool_name": "send_command_get_response",
-                "arguments": {"command": "LED_OFF", "params": {}}
-            }
-        elif "угол" in user_query.lower() or "серво" in user_query.lower():
-            import re
-            angle_match = re.search(r'(\d+)', user_query)
-            angle = int(angle_match.group(1)) if angle_match else 90
-            return {
-                "tool_name": "send_command_get_response",
-                "arguments": {"command": "SET_SERVO_ANGLE", "params": {"angle": angle}}
-            }
-        else:
-            return {
-                "tool_name": "general_response",
-                "arguments": {"query": user_query}
-            }
-    
-    def run(self, user_request: str) -> str:
-        """Выполняет запрос пользователя"""
-        tool_choice = self.choose_tool(user_request)
-        tool_name = tool_choice["tool_name"]
-        arguments = tool_choice["arguments"]
-        
-        if tool_name in self.tools:
-            result = self.tools[tool_name](**arguments)
-            return result
-        else:
-            return f"Неизвестный инструмент: {tool_name}"
 
-# Демонстрация цикла ReAct с использованием ответов
-def demonstrate_react_cycle():
+        # Определяем инструменты для Ollama
+        self.tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_sensor",
+                    "description": "Чтение данных с сенсора на Arduino",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "sensor_type": {
+                                "type": "string",
+                                "enum": ["temperature", "light"],
+                                "description": "Тип сенсора"
+                            }
+                        },
+                        "required": ["sensor_type"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_device_status",
+                    "description": "Получение статуса Arduino устройства",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "send_command_get_response",
+                    "description": "Отправка команды на Arduino и получение ответа",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {
+                                "type": "string",
+                                "enum": ["LED_ON", "LED_OFF", "SET_SERVO_ANGLE"],
+                                "description": "Команда для Arduino"
+                            },
+                            "params": {
+                                "type": "object",
+                                "description": "Параметры команды, например угол для сервопривода"
+                            }
+                        },
+                        "required": ["command"]
+                    }
+                }
+            }
+        ]
+
+    def run_with_ollama(self, user_request: str) -> str:
+        """Выполняет запрос пользователя через Ollama с использованием инструментов"""
+        system_prompt = """
+        Ты — ИИ-агент, способный взаимодействовать с Arduino устройством, получать данные с сенсоров и управлять устройством.
+        Используй доступные инструменты:
+        - read_sensor: для чтения данных с сенсоров (температура, свет и т.д.)
+        - get_device_status: для получения статуса устройства
+        - send_command_get_response: для отправки команд (вкл/выкл светодиод, установка угла сервопривода)
+        Отвечай на русском языке.
+        """
+
+        try:
+            # Вызываем Ollama с инструментами
+            response = ollama.chat(
+                model='llama3',
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_request}
+                ],
+                tools=self.tools,
+                options={"temperature": 0.3}
+            )
+
+            message = response['message']
+
+            # Проверяем, вызваны ли инструменты
+            if 'tool_calls' in message and message['tool_calls']:
+                results = []
+                for tool_call in message['tool_calls']:
+                    function_name = tool_call['function']['name']
+                    arguments = json.loads(tool_call['function']['arguments'])
+
+                    if function_name == "read_sensor":
+                        sensor_response = self.arduino.read_sensor(arguments.get('sensor_type', 'temperature'))
+                        results.append(f"Данные сенсора: {sensor_response.get('value', 'неизвестно')}")
+
+                    elif function_name == "get_device_status":
+                        status_response = self.arduino.get_device_status()
+                        led_status = status_response.get('led_status', False)
+                        results.append(f"Статус устройства: светодиод {'включен' if led_status else 'выключен'}")
+
+                    elif function_name == "send_command_get_response":
+                        command_map = {
+                            'LED_ON': 0x01,
+                            'LED_OFF': 0x02,
+                            'SET_SERVO_ANGLE': 0x03
+                        }
+                        cmd_code = command_map.get(arguments['command'])
+                        if cmd_code:
+                            if arguments['command'] == 'SET_SERVO_ANGLE':
+                                angle = arguments.get('params', {}).get('angle', 90)
+                                response = self.arduino.send_command_get_response(cmd_code, [angle])
+                            else:
+                                response = self.arduino.send_command_get_response(cmd_code)
+
+                            # Обрабатываем ответ
+                            if response.get('type') == 'ACK':
+                                results.append(f"Команда выполнена: {arguments['command']}")
+                            elif response.get('type') == 'ERROR':
+                                results.append(f"Ошибка выполнения команды: {response.get('message', '')}")
+                            else:
+                                results.append(f"Результат команды: {response}")
+
+                # Если были вызовы инструментов, получаем финальный ответ
+                if results:
+                    tool_results_content = "Результаты инструментов: " + "; ".join(results)
+
+                    final_response = ollama.chat(
+                        model='llama3',
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_request},
+                            {"role": "tool", "content": tool_results_content}
+                        ]
+                    )
+
+                    return final_response['message']['content']
+
+            # Если инструменты не вызваны, возвращаем обычный ответ
+            return message['content']
+
+        except Exception as e:
+            return f"Ошибка при работе с Ollama: {e}"
+
+# Демонстрация цикла ReAct с использованием ответов через Ollama
+def demonstrate_ollama_react_cycle():
     """
-    Демонстрирует, как ответы от Arduino влияют на принятие решений ИИ-агентом
+    Демонстрирует, как ответы от Arduino влияют на принятие решений Ollama ИИ-агентом
     """
-    print("=== Демонстрация цикла ReAct с ответами от Arduino ===")
-    
-    agent = AgentWithResponses()
-    
+    print("=== Демонстрация цикла ReAct с ответами от Arduino через Ollama ===")
+
+    agent = OllamaAgentWithResponses()
+
     # Сценарий: "Если температура выше 25, включи вентилятор"
-    print("\nСценарий: Проверка температуры и управление по результату")
-    
-    # 1. Получаем текущую температуру
-    temp_response = agent.read_sensor("temperature")
-    print(f"Мышль: Анализирую текущую температуру: {temp_response}")
-    
-    # 2. Извлекаем значение температуры из ответа
-    try:
-        temp_value = int(temp_response.split()[-1]) if "Данные сенсора:" in temp_response else 0
-    except:
-        temp_value = 0
-    
-    # 3. Принимаем решение на основе полученной информации
-    if temp_value > 25:
-        print(f"Действие: Температура {temp_value} > 25, включаю светодиод (вентилятор)")
-        fan_response = agent.send_command_get_response("LED_ON")
-        print(f"Наблюдение: {fan_response}")
-    else:
-        print(f"Действие: Температура {temp_value} <= 25, ничего не делаю")
-    
-    # 4. Проверяем конечное состояние
-    status_response = agent.get_device_status()
-    print(f"Завершено. Статус: {status_response}")
+    scenario_request = "Проверь температуру, и если она выше 25 градусов, включи светодиод"
+    print(f"Сценарий: {scenario_request}")
+
+    result = agent.run_with_ollama(scenario_request)
+    print(f"Результат Ollama агента: {result}")
 
 if __name__ == "__main__":
-    # Тестируем обычного агента
-    agent = AgentWithResponses()
-    
+    # Тестируем Ollama агента
+    agent = OllamaAgentWithResponses()
+
     test_queries = [
         "Какая температура?",
         "Покажи статус устройства",
         "Включи светодиод",
-        "Выключи светодиод"
+        "Выключи светодиод",
+        "Установи угол сервопривода на 90 градусов"
     ]
-    
-    print("=== Тестирование агента с обработкой ответов ===")
+
+    print("=== Тестирование Ollama агента с обработкой ответов ===")
     for query in test_queries:
-        print(f"\nЗапрос: {query}")
-        result = agent.run(query)
-        print(f"Ответ: {result}")
-    
+        print(f"\n--- Запрос: {query} ---")
+        result = agent.run_with_ollama(query)
+        print(f"Результат: {result}")
+        print("-" * 50)
+
     # Демонстрация цикла ReAct
-    demonstrate_react_cycle()
-    
+    demonstrate_ollama_react_cycle()
+
     agent.arduino.close()
 ```
 
@@ -827,21 +813,22 @@ def _get_last_command(self):
     return "UNKNOWN_COMMAND"
 ```
 
-## 8. Заключение: Замкнутый цикл взаимодействия
+## 8. Заключение: Замкнутый цикл взаимодействия с Ollama
 
 В этом уроке мы:
 - Реализовали полноценную систему обработки ответов от Arduino
 - Создали механизм интерпретации ответов в контексте цели агента
 - Обеспечили двунаправленное взаимодействие "команда → ответ → новое решение"
 - Добавили надежную обработку ошибок и восстановление
-- Демонстрировали, как ИИ-агент может принимать решения на основе полученной информации
+- Демонстрировали, как Ollama ИИ-агент может принимать решения на основе полученной информации
+- Интегрировали понимание естественного языка через Ollama с физическим взаимодействием
 
-Теперь у нас есть **замкнутая система**, где ИИ-агент может:
+Теперь у нас есть **замкнутая система**, где Ollama ИИ-агент может:
 1. **Воспринимать** информацию от физических устройств (сенсоры)
-2. **Рассуждать** на основе полученных данных
+2. **Рассуждать** на основе полученных данных, понимая команды на естественном языке
 3. **Действовать** на физические устройства (команды)
 4. **Наблюдать** результаты своих действий
 
-Это реализация полного цикла "Восприятие – Рассуждение – Действие – Наблюдение", который делает ИИ-агентов по-настоящему мощными инструментами для взаимодействия с физическим миром.
+Это реализация полного цикла "Восприятие – Рассуждение – Действие – Наблюдение", который делает Ollama ИИ-агентов по-настоящему мощными инструментами для взаимодействия с физическим миром через понимание естественного языка.
 
-В следующем уроке мы углубимся в реализацию FSM и enum на стороне Arduino для более надежной обработки протокола, что еще больше повысит надежность и функциональность системы.
+В следующем уроке мы углубимся в реализацию FSM и enum на стороне Arduino для более надежной обработки протокола, что еще больше повысит надежность и функциональность системы с использованием Ollama.

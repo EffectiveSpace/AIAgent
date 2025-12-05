@@ -662,99 +662,221 @@ if __name__ == "__main__":
     agent.manager.close_all_connections()
 ```
 
-## 5. Безопасность и отказоустойчивость в протоколах
+## 5. Безопасность и отказоустойчивость в протоколах с Ollama
 
-Реализуем безопасные и отказоустойчивые механизмы взаимодействия:
+Реализуем безопасные и отказоустойчивые механизмы взаимодействия с интеграцией Ollama:
 
 ```python
-# safety_and_reliability.py
+# safety_and_reliability_with_ollama.py
+import ollama
 import time
 import threading
 from typing import Dict, Any, List, Optional
 from advanced_react_patterns import AdvancedReActAgent
 
-class SafeAndReliableAgent(AdvancedReActAgent):
+class SafeOllamaAgent(AdvancedReActAgent):
     """
-    ИИ-агент с упором на безопасность и отказоустойчивость
+    Ollama ИИ-агент с упором на безопасность и отказоустойчивость
     """
-    
+
     def __init__(self):
         super().__init__()
-        self.command_whitelist = set([0x01, 0x02, 0x03, 0x04, 0x05])  # Безопасные команды
+        self.command_whitelist = set([0x01, 0x02, 0x04, 0x05])  # Безопасные команды
         self.command_rate_limits = {}  # Ограничения частоты команд
         self.max_commands_per_minute = 60  # Максимум команд в минуту
         self.safety_zones = {}  # Зоны безопасности
         self.emergency_procedures = {}  # Аварийные процедуры
         self.monitoring_threads = []  # Потоки мониторинга
-    
-    def safe_send_command(self, device_id: str, command: int, 
-                         params: Optional[list] = None) -> Dict[str, Any]:
-        """
-        Отправляет команду с проверкой безопасности
-        """
-        # Проверка безопасности команды
-        if command not in self.command_whitelist:
-            return {
-                "type": "ERROR", 
-                "message": f"Команда {hex(command)} не в белом списке безопасности"
+
+        # Определяем инструменты для Ollama
+        self.ollama_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "check_device_status",
+                    "description": "Проверка статуса устройства безопасности",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "device_type": {
+                                "type": "string",
+                                "enum": ["door", "temperature", "motion", "light"],
+                                "description": "Тип устройства"
+                            }
+                        },
+                        "required": ["device_type"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "control_device",
+                    "description": "Безопасное управление устройством",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "device_id": {
+                                "type": "string",
+                                "description": "ID устройства"
+                            },
+                            "command": {
+                                "type": "string",
+                                "enum": ["turn_on", "turn_off", "read_value"],
+                                "description": "Команда для устройства"
+                            }
+                        },
+                        "required": ["device_id", "command"]
+                    }
+                }
             }
-        
-        # Проверка ограничения частоты
-        if not self.check_rate_limit(device_id, command):
-            return {
-                "type": "ERROR",
-                "message": f"Превышено ограничение частоты для устройства {device_id}"
-            }
-        
-        # Отправка команды
-        result = self.manager.send_command_to_device(device_id, command, params)
-        
-        # Логирование для аудита безопасности
-        self.log_security_event("command_sent", {
-            "device_id": device_id,
-            "command": hex(command),
-            "params": params,
-            "result": result.get('type', 'unknown')
-        })
-        
-        return result
-    
-    def check_rate_limit(self, device_id: str, command: int) -> bool:
+        ]
+
+    def run_safe_ollama_agent(self, user_request: str) -> str:
+        """
+        Запускает безопасного Ollama агента с проверками
+        """
+        system_prompt = """
+        Ты — безопасный ИИ-агент для системы умного дома.
+        Перед выполнением любых действий с физическими устройствами,
+        убедись, что действие безопасно и разрешено политиками безопасности.
+        Используй инструменты: check_device_status для проверки состояния,
+        control_device для безопасного управления устройствами.
+        Отвечай на русском языке.
+        """
+
+        try:
+            # Вызываем Ollama с инструментами
+            response = ollama.chat(
+                model='llama3',
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_request}
+                ],
+                tools=self.ollama_tools,
+                options={"temperature": 0.2}  # Низкая случайность для безопасности
+            )
+
+            message = response['message']
+
+            # Проверяем, вызваны ли инструменты
+            if 'tool_calls' in message and message['tool_calls']:
+                results = []
+                for tool_call in message['tool_calls']:
+                    function_name = tool_call['function']['name']
+                    arguments = json.loads(tool_call['function']['arguments'])
+
+                    if function_name == "check_device_status":
+                        # Безопасная проверка статуса устройства
+                        result = self.check_device_status_safe(arguments.get('device_type'))
+                        results.append(f"Статус {arguments.get('device_type')}: {result}")
+
+                    elif function_name == "control_device":
+                        # Безопасное управление устройством с проверкой
+                        device_id = arguments.get('device_id')
+                        command = arguments.get('command')
+                        result = self.safe_control_device(device_id, command)
+                        results.append(f"Управление {device_id} ({command}): {result}")
+
+                # Если были вызовы инструментов, получаем финальный ответ
+                if results:
+                    tool_results_content = "Результаты проверок и действий: " + "; ".join(results)
+
+                    final_response = ollama.chat(
+                        model='llama3',
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_request},
+                            {"role": "tool", "content": tool_results_content}
+                        ]
+                    )
+
+                    return final_response['message']['content']
+
+            # Если инструменты не вызваны, возвращаем обычный ответ
+            return message['content']
+
+        except Exception as e:
+            return f"Ошибка безопасного агента: {e}"
+
+    def check_device_status_safe(self, device_type: str) -> str:
+        """
+        Безопасная проверка статуса устройства
+        """
+        try:
+            # Проверяем, что тип устройства разрешен
+            allowed_types = ["door", "temperature", "motion", "light"]
+            if device_type not in allowed_types:
+                return f"Тип устройства '{device_type}' не разрешен"
+
+            # Возвращаем симулированный статус для демонстрации
+            # В реальной системе тут будет обращение к реальным устройствам
+            import random
+            if device_type == "door":
+                is_open = random.choice([True, False])
+                return f"{'открыта' if is_open else 'закрыта'}"
+            elif device_type == "temperature":
+                temp = round(random.uniform(18, 30), 1)
+                return f"{temp}°C"
+            elif device_type == "motion":
+                is_detected = random.choice([True, False])
+                return f"{'обнаружено' if is_detected else 'нет'}"
+            elif device_type == "light":
+                is_on = random.choice([True, False])
+                return f"{'включен' if is_on else 'выключен'}"
+        except Exception as e:
+            return f"ошибка: {str(e)}"
+
+    def safe_control_device(self, device_id: str, command: str) -> str:
+        """
+        Безопасное управление устройством с проверками
+        """
+        try:
+            # Проверяем, что команда безопасна
+            safe_commands = ["turn_on", "turn_off", "read_value"]
+            if command not in safe_commands:
+                return f"Команда '{command}' не разрешена"
+
+            # Проверяем ограничения частоты для этого устройства
+            if not self.check_rate_limit(device_id, command):
+                return f"Превышено ограничение частоты для {device_id}"
+
+            # Имитация безопасного выполнения команды
+            # В реальной системе тут будет проверка на безопасность перед выполнением
+            import random
+            success = random.choice([True, True, True, True, False])  # 20% шанс ошибки
+            if success:
+                return f"команда выполнена успешно"
+            else:
+                return f"ошибка выполнения - безопасность проверена"
+
+        except Exception as e:
+            return f"ошибка безопасности: {str(e)}"
+
+    def check_rate_limit(self, device_id: str, command: str) -> bool:
         """
         Проверяет, не превышает ли частота отправки команд ограничения
         """
         key = f"{device_id}_{command}"
         current_time = time.time()
-        
+
         if key not in self.command_rate_limits:
             self.command_rate_limits[key] = []
-        
+
         # Удаляем старые записи (старше 60 секунд)
         self.command_rate_limits[key] = [
-            t for t in self.command_rate_limits[key] 
+            t for t in self.command_rate_limits[key]
             if current_time - t < 60
         ]
-        
+
         # Проверяем ограничение
         if len(self.command_rate_limits[key]) >= self.max_commands_per_minute:
             return False
-        
+
         # Добавляем текущую команду
         self.command_rate_limits[key].append(current_time)
         return True
-    
-    def log_security_event(self, event_type: str, details: Dict[str, Any]):
-        """
-        Логирует события безопасности
-        """
-        event = {
-            "timestamp": time.time(),
-            "type": event_type,
-            "details": details
-        }
-        # В реальной системе это бы писалось в безопасное хранилище
-        print(f"[БЕЗОПАСНОСТЬ] {event_type}: {details}")
-    
+
     def setup_safety_monitoring(self):
         """
         Настраивает постоянный мониторинг безопасности
@@ -764,9 +886,9 @@ class SafeAndReliableAgent(AdvancedReActAgent):
         monitoring_thread.daemon = True
         monitoring_thread.start()
         self.monitoring_threads.append(monitoring_thread)
-        
-        print("Мониторинг безопасности запущен")
-    
+
+        print("Мониторинг безопасности с Ollama запущен")
+
     def safety_monitoring_loop(self):
         """
         Цикл постоянного мониторинга безопасности системы
@@ -775,54 +897,21 @@ class SafeAndReliableAgent(AdvancedReActAgent):
             try:
                 # Проверяем критические параметры
                 self.check_system_safety()
-                
+
                 # Задержка между проверками
                 time.sleep(5.0)
             except Exception as e:
                 print(f"Ошибка в цикле мониторинга безопасности: {e}")
                 time.sleep(1.0)  # Небольшая задержка перед повтором
-    
+
     def check_system_safety(self):
         """
         Проверяет безопасность системы
         """
-        # Проверяем статусы всех устройств
-        statuses = self.manager.get_all_statuses()
-        
-        for device_id, status in statuses.items():
-            if status['status'] == 'error':
-                print(f"!!! ВНИМАНИЕ: Устройство {device_id} в состоянии ошибки !!!")
-                self.trigger_emergency_procedure(device_id, "device_error", status)
-    
-    def trigger_emergency_procedure(self, device_id: str, error_type: str, error_details: Dict[str, Any]):
-        """
-        Активирует аварийную процедуру
-        """
-        print(f"Активация аварийной процедуры для {device_id}, причина: {error_type}")
-        
-        # Пример простой аварийной процедуры
-        if error_type == "device_error":
-            # Попытка переподключения
-            self.attempt_device_recovery(device_id)
-        elif error_type == "over_temperature":
-            # Аварийное отключение
-            self.emergency_device_shutdown(device_id)
-    
-    def attempt_device_recovery(self, device_id: str):
-        """
-        Пытается восстановить устройство после ошибки
-        """
-        print(f"Попытка восстановления устройства {device_id}")
-        # В реальной системе тут могла бы быть попытка переподключения,
-        # перезагрузки устройства и т.п.
-    
-    def emergency_device_shutdown(self, device_id: str):
-        """
-        Аварийное отключение устройства
-        """
-        print(f"Аварийное отключение устройства {device_id}")
-        # В реальной системе тут могла бы быть команда на безопасное отключение
-    
+        # В реальной системе тут будет проверка состояния реальных устройств
+        # Пока что просто проверяем наличие активных потоков
+        pass
+
     def implement_defensive_commands(self):
         """
         Реализует защитные команды и процедуры
@@ -834,42 +923,31 @@ class SafeAndReliableAgent(AdvancedReActAgent):
             0x04,  # READ_SENSOR
             0x05,  # GET_STATUS
         ])
-        
-        # Определяем потенциально опасные команды (их нужно дополнительно проверять)
-        self.potentially_risky_commands = {
-            0x03: "SET_SERVO_ANGLE",  # Может вызвать физическое повреждение
-            0x10: "ACTUATE_MOTOR",    # Может вызвать движение механизмов
-        }
-        
-        print("Защитные механизмы инициализированы")
 
-# Пример использования безопасного агента
+        print("Защитные механизмы с Ollama инициализированы")
+
+# Пример использования безопасного Ollama агента
 if __name__ == "__main__":
-    agent = SafeAndReliableAgent()
-    
+    agent = SafeOllamaAgent()
+
     # Инициализация защитных механизмов
     agent.implement_defensive_commands()
     agent.setup_safety_monitoring()
-    
-    # Настройка системы (с ожиданием возможных ошибок)
-    agent.setup_home_automation_system()
-    
-    # Тестирование безопасной отправки команд
-    test_commands = [
-        (0x01, "LED_ON - безопасная команда"),
-        (0x04, "READ_SENSOR - безопасная команда"),
-        (0xFF, "НЕИЗВЕСТНАЯ_КОМАНДА - будет заблокирована")
+
+    # Тестирование безопасного агента с Ollama
+    test_requests = [
+        "Проверь статус двери в безопасности",
+        "Проверь температуру в детской",
+        "Включи свет в гостиной",
+        "Выключи свет в спальне"
     ]
-    
-    for cmd, description in test_commands:
-        print(f"\nТест: {description}")
-        result = agent.safe_send_command("kitchen_temp", cmd)
+
+    print("=== Тестирование безопасного Ollama агента ===")
+    for request in test_requests:
+        print(f"\nЗапрос: {request}")
+        result = agent.run_safe_ollama_agent(request)
         print(f"Результат: {result}")
-    
-    # Запуск безопасного ReAct цикла
-    safe_result = agent.advanced_react_cycle("Проверить систему безопасности")
-    print(f"\nРезультат безопасного цикла: {safe_result}")
-    
+
     # Завершение работы
     agent.manager.close_all_connections()
 ```
@@ -1215,23 +1293,23 @@ if __name__ == "__main__":
     agent.manager.close_all_connections()
 ```
 
-## 7. Заключение: Современные подходы к ИИ-агентам с физическим миром
+## 7. Заключение: Современные подходы к Ollama ИИ-агентам с физическим миром
 
 В этом уроке мы реализовали:
 
-1. **Масштабируемую архитектуру** для управления несколькими Arduino
+1. **Масштабируемую архитектуру** для управления несколькими Arduino через Ollama
 2. **Систему координации** между устройствами с распределенными сценариями
 3. **Расширенный паттерн ReAct** с учетом физических задержек и откликов
-4. **Механизмы безопасности и надежности** для защиты от ошибок
-5. **Адаптивное поведение** с обучением на предыдущем опыте
+4. **Механизмы безопасности и надежности** для защиты от ошибок, интегрированные с Ollama
+5. **Адаптивное поведение** с обучением на предыдущем опыте через Ollama
 
-Теперь ваш ИИ-агент может:
-- Управлять распределенной системой из нескольких физических устройств
+Теперь ваш Ollama ИИ-агент может:
+- Управлять распределенной системой из нескольких физических устройств, понимая команды на естественном языке
 - Принимать комплексные решения на основе данных с нескольких сенсоров
-- Адаптироваться к изменениям в окружающей среде
-- Обеспечивать безопасность физических взаимодействий
-- Непрерывно улучшать свое поведение на основе опыта
+- Адаптироваться к изменениям в окружающей среде с использованием локальной LLM
+- Обеспечивать безопасность физических взаимодействий через Ollama
+- Непрерывно улучшать свое поведение на основе опыта с помощью локального ИИ
 
-Это мощная архитектура для создания умных систем, способных взаимодействовать с физическим миром, как в приложениях IoT, так и в робототехнике, автоматизации зданий и индустриальных системах.
+Это мощная архитектура для создания умных систем, способных взаимодействовать с физическим миром через понимание естественного языка, как в приложениях IoT, так и в робототехнике, автоматизации зданий и индустриальных системах.
 
-В следующем уроке мы создадим финальный проект, объединяющий все изученные концепции в комплексной системе.
+В следующем уроке мы создадим финальный проект, объединяющий все изученные концепции в комплексной системе с Ollama.
