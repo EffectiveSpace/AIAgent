@@ -189,15 +189,60 @@ class AdvancedVoiceAIController:
         
         # Команды Arduino
         self.commands = {
-            'turn_on_led': {'command': 0x01, 'params': []},
-            'turn_off_led': {'command': 0x02, 'params': []},
-            'blink_led': {'command': 0x03, 'params': [3]},
-            'get_temperature': {'command': 0x07, 'params': []},
-            'get_light': {'command': 0x08, 'params': []},
-            'get_all_sensors': {'command': 0x09, 'params': []},
-            'set_servo_angle': {'command': 0x05, 'params': [90]},
-            'get_servo_angle': {'command': 0x06, 'params': []},
-            'set_auto_mode': {'command': 0x0A, 'params': [0]}
+            'turn_on_led': {
+                'command': 0x01,
+                'params': [],
+                'description': 'Включить светодиод на Arduino'
+            },
+            'turn_off_led': {
+                'command': 0x02,
+                'params': [],
+                'description': 'Выключить светодиод на Arduino'
+            },
+            'blink_led': {
+                'command': 0x03,
+                'params': [3],
+                'description': 'Мигнуть светодиодом на Arduino. Аргумент: {"times": int}',
+                'parameters': {
+                    'times': {'type': 'int', 'description': 'Количество миганий (1-10)'}
+                }
+            },
+            'get_temperature': {
+                'command': 0x07,
+                'params': [],
+                'description': 'Получить температуру с датчика на Arduino'
+            },
+            'get_light': {
+                'command': 0x08,
+                'params': [],
+                'description': 'Получить уровень освещенности с датчика на Arduino'
+            },
+            'get_all_sensors': {
+                'command': 0x09,
+                'params': [],
+                'description': 'Получить данные всех датчиков на Arduino'
+            },
+            'set_servo_angle': {
+                'command': 0x05,
+                'params': [90],
+                'description': 'Установить угол сервопривода на Arduino. Аргумент: {"angle": int}',
+                'parameters': {
+                    'angle': {'type': 'int', 'description': 'Угол в градусах (0-180)'}
+                }
+            },
+            'get_servo_angle': {
+                'command': 0x06,
+                'params': [],
+                'description': 'Получить текущий угол сервопривода на Arduino'
+            },
+            'set_auto_mode': {
+                'command': 0x0A,
+                'params': [0],  # 0=выкл, 1=вкл
+                'description': 'Включить/выключить автоматический режим. Аргумент: {"enabled": bool}',
+                'parameters': {
+                    'enabled': {'type': 'int', 'description': '1 для включения, 0 для выключения'}
+                }
+            }
         }
         
         # Состояние системы
@@ -232,8 +277,169 @@ class AdvancedVoiceAIController:
             print(f"Ошибка сервиса распознавания: {e}")
             return None
     
+    def query_ollama_with_tools(self, user_query):
+        """Запрос к Ollama с использованием системного промпта для выбора команд Arduino"""
+        # Формируем описания доступных команд для системного промпта
+        available_commands = []
+        for cmd_name, cmd_info in self.commands.items():
+            cmd_desc = f"- '{cmd_name}': {cmd_info['description']}"
+            if 'parameters' in cmd_info:
+                params_desc = ", ".join([f"{param}: {details['type']}" for param, details in cmd_info['parameters'].items()])
+                cmd_desc += f". Аргументы: {{{params_desc}}}"
+            available_commands.append(cmd_desc)
+
+        system_prompt = f"""
+        Ты - ИИ-диспетчер для Arduino. Твоя задача - проанализировать запрос пользователя и выбрать подходящую команду для Arduino.
+
+        Доступные команды:
+        {'; '.join(available_commands)}
+
+        Формат ответа: только JSON вида {{"command_name": "...", "arguments": {{...}}}}.
+        Не отвечай ничего кроме этого JSON.
+
+        Примеры:
+        Пользователь: Включи свет
+        Твой ответ: {{"command_name": "turn_on_led", "arguments": {{}}}}
+
+        Пользователь: Помигай 5 раз
+        Твой ответ: {{"command_name": "blink_led", "arguments": {{"times": 5}}}}
+
+        Пользователь: Поверни серво на 90 градусов
+        Твой ответ: {{"command_name": "set_servo_angle", "arguments": {{"angle": 90}}}}
+
+        Пользователь: Какая температура?
+        Твой ответ: {{"command_name": "get_temperature", "arguments": {{}}}}
+
+        Пользователь: Включи автоматический режим
+        Твой ответ: {{"command_name": "set_auto_mode", "arguments": {{"enabled": 1}}}}
+        """
+
+        if self.use_local_ollama:
+            # Используем локальную библиотеку ollama
+            try:
+                response = ollama.chat(
+                    model=self.model,
+                    messages=[
+                        {
+                            'role': 'system',
+                            'content': system_prompt
+                        },
+                        {
+                            'role': 'user',
+                            'content': user_query,
+                        },
+                    ]
+                )
+                return response['message']['content']
+            except Exception as e:
+                print(f"Ошибка при запросе к локальной модели Ollama: {e}")
+                return ""
+        else:
+            # Используем HTTP API
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": system_prompt
+                    },
+                    {
+                        "role": "user",
+                        "content": user_query
+                    }
+                ],
+                "stream": False
+            }
+
+            response = requests.post(self.ollama_url, json=payload)
+            if response.status_code == 200:
+                result = response.json()
+                return result.get('message', {}).get('content', result.get('response', ''))
+            else:
+                print(f"Ошибка при запросе к Ollama: {response.status_code}")
+                return ""
+
+    def call_arduino_command(self, command_name, arguments=None):
+        """Вызов команды Arduino на основе результата LLM с аргументами"""
+        if command_name not in self.commands:
+            print(f"Неизвестная команда: {command_name}")
+            return None
+
+        cmd_info = self.commands[command_name]
+
+        # Подготовим параметры на основе аргументов
+        params = []
+
+        if arguments and isinstance(arguments, dict):
+            if command_name == 'blink_led' and 'times' in arguments:
+                # Для blink_led используем количество миганий из аргументов
+                times = min(10, max(1, int(arguments['times'])))  # Ограничиваем от 1 до 10
+                params = [times]
+            elif command_name == 'set_servo_angle' and 'angle' in arguments:
+                # Для set_servo_angle используем угол из аргументов
+                angle = min(180, max(0, int(arguments['angle'])))  # Ограничиваем от 0 до 180
+                params = [angle]
+            elif command_name == 'set_auto_mode' and 'enabled' in arguments:
+                # Для set_auto_mode используем значение enabled из аргументов
+                enabled = 1 if arguments['enabled'] else 0
+                params = [enabled]
+
+        # Если параметры не были заданы аргументами, используем параметры по умолчанию
+        if not params and 'params' in cmd_info:
+            params = cmd_info['params']
+
+        # Отправляем команду на Arduino
+        data = [cmd_info['command']] + params
+        crc = sum(data) & 0xFF
+        packet = [0xAA, 0x55, len(data)] + data + [crc]
+
+        self.arduino.write(bytes(packet))
+        print(f"Отправлена команда {command_name} с параметрами {params}: {[hex(b) for b in packet]}")
+
+        # Возвращаем команду и параметры для дальнейшей обработки
+        return command_name, params
+
+    def process_request_with_tools(self, user_request):
+        """Обработка пользовательского запроса через ИИ с использованием инструментов и выполнение на Arduino"""
+        print(f"Пользовательский запрос: {user_request}")
+
+        # Запрашиваем у LLM выбор команды
+        ai_response = self.query_ollama_with_tools(user_request)
+        print(f"Ответ от ИИ (JSON): {ai_response.strip()}")
+
+        try:
+            # Парсим JSON ответ от ИИ
+            response_data = json.loads(ai_response.strip())
+            command_name = response_data.get('command_name')
+            arguments = response_data.get('arguments', {})
+
+            if command_name:
+                # Выполняем команду на Arduino
+                result = self.call_arduino_command(command_name, arguments)
+
+                if result:
+                    # Ждем ответ от Arduino (если есть)
+                    start_time = time.time()
+                    while self.arduino.in_waiting == 0 and time.time() - start_time < 2:
+                        time.sleep(0.1)
+
+                    if self.arduino.in_waiting:
+                        response = self.arduino.readline().decode().strip()
+                        print(f"Ответ Arduino: {response}")
+                else:
+                    print("Команда не выполнена из-за ошибки")
+            else:
+                print("Команда не распознана или не требует выполнения на Arduino")
+        except json.JSONDecodeError:
+            print("Ошибка парсинга JSON ответа от ИИ")
+            print("Пытаемся использовать старый метод...")
+            # В случае ошибки используем старый метод
+            self.process_command_with_ai(user_request)
+        except Exception as e:
+            print(f"Ошибка при обработке запроса: {e}")
+
     def query_ollama(self, prompt):
-        """Запрос к Ollama - использует либо HTTP API, либо локальную библиотеку ollama"""
+        """Запрос к Ollama - использует либо HTTP API, либо локальную библиотеку ollama (старый метод для совместимости)"""
         if self.use_local_ollama:
             # Используем локальную библиотеку ollama
             try:
@@ -493,6 +699,15 @@ if __name__ == "__main__":
     # Альтернатива: использование через HTTP API
     # controller = AdvancedVoiceAIController('COM3', use_local_ollama=False, ollama_url="http://localhost:11434/api/generate", model="llama2")
 
+    print("=== Демонстрация работы с инструментами ===")
+    # Примеры запросов с новой системой инструментов
+    controller.process_request_with_tools("Turn on the LED")
+    time.sleep(2)
+    controller.process_request_with_tools("Rotate servo to 90 degrees")
+    time.sleep(3)
+    controller.process_request_with_tools("Turn off the LED")
+
+    print("\n=== Запуск голосового ассистента ===")
     try:
         controller.run()
     except KeyboardInterrupt:
